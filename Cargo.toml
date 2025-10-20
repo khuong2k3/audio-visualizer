@@ -1,0 +1,11 @@
+[package]
+name = "audio-capture"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.100"
+clap = { version = "4.5.49", features = ["derive"] }
+cpal = "0.16.0"
+pipewire = { version = "0.9.2", features = ["v0_3_44"] }
+ringbuf = "0.4.8"
