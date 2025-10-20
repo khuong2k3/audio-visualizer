@@ -1,4 +1,5 @@
-use crossterm::{cursor, style, terminal, QueueableCommand};
+use crossterm::style::Stylize;
+use crossterm::terminal;
 use pipewire as pw;
 use pipewire::registry::GlobalObject;
 use pipewire::spa::param::format::{MediaSubtype, MediaType};
@@ -8,18 +9,19 @@ use rustfft::FftPlanner;
 use rustfft::num_complex::{Complex32, ComplexFloat};
 use spa::pod::Pod;
 use std::cell::{Cell, OnceCell};
-use std::io::{Write, stdout};
+use std::io::stdout;
 use std::rc::Rc;
-use std::sync::mpsc;
 use std::{mem, slice};
+
+use crate::buffer::Buffer;
 
 mod buffer;
 
-const FIRE_STRING: [char; 52] = [
-    ' ', ',', ';', '+', 'l', 't', 'g', 't', 'i', '!', 'l', 'I', '?', '/', '\\', '|', ')', '(', '1',
-    '}', '{', ']', '[', 'r', 'c', 'v', 'z', 'j', 'f', 't', 'J', 'U', 'O', 'Q', 'o', 'c', 'x', 'f',
-    'X', 'h', 'q', 'w', 'W', 'B', '8', '&', '%', '$', '#', '@', '"', ';',
-];
+//const FIRE_STRING: [char; 52] = [
+//    ' ', ',', ';', '+', 'l', 't', 'g', 't', 'i', '!', 'l', 'I', '?', '/', '\\', '|', ')', '(', '1',
+//    '}', '{', ']', '[', 'r', 'c', 'v', 'z', 'j', 'f', 't', 'J', 'U', 'O', 'Q', 'o', 'c', 'x', 'f',
+//    'X', 'h', 'q', 'w', 'W', 'B', '8', '&', '%', '$', '#', '@', '"', ';',
+//];
 
 struct UserData {
     format: spa::param::audio::AudioInfoRaw,
@@ -35,10 +37,11 @@ const FILTER_NAME: &str = "audio-capture";
 //}
 
 const MIN_DB: f32 = -90.0;
-const MAX_DB: f32 = -10.0;
+const MAX_DB: f32 = 20.0;
+const N_FFT: usize = 128 + 64;
 
 fn min_max_norm(n: f32, min_v: f32, max_v: f32) -> f32 {
-    (n - min_v) / (max_v - min_v)
+    (n.min(max_v).max(min_v) - min_v) / (max_v - min_v)
 }
 
 #[allow(unused)]
@@ -76,12 +79,6 @@ pub fn main() -> Result<(), pw::Error> {
         cursor_move: false,
     };
 
-    let mut fft = FftPlanner::<f32>::new();
-    let fft_forward = fft.plan_fft(256, rustfft::FftDirection::Forward);
-    let mut fft_buffer = vec![Complex32::default(); 256];
-    let mut fft_scratch = fft_buffer.clone();
-    //fft_forward.process_with_scratch(buffer, scratch);
-
     let props = properties! {
         *pw::keys::MEDIA_TYPE => "Audio",
         // Stream/Audio/Input why this is correct ???
@@ -93,15 +90,28 @@ pub fn main() -> Result<(), pw::Error> {
 
     let stream = pw::stream::StreamBox::new(&core, FILTER_NAME, props)?;
 
-    stdout()
-        .queue(terminal::Clear(terminal::ClearType::All))
-        .unwrap()
-        .queue(cursor::MoveTo(0, 0))
-        .unwrap()
-        .queue(cursor::Hide)
-        .unwrap()
-        .flush()
-        .unwrap();
+    let mut fft_planner = FftPlanner::<f32>::new();
+    let fft_forward = fft_planner.plan_fft(N_FFT, rustfft::FftDirection::Forward);
+    let mut fft_buffer = vec![Complex32::default(); N_FFT];
+    let mut fft_scratch = fft_buffer.clone();
+
+    let mut view_buffer = Buffer::<Vec<f32>>::new();
+
+    let (_, height) = terminal::size().unwrap();
+    view_buffer.resize(N_FFT, height as usize);
+
+    view_buffer.on_update(move |buf, width, height, fft_norm| {
+        for (col, fft) in fft_norm.iter().enumerate() {
+            for (i, row) in (0..height).rev().enumerate() {
+                buf[row * width + col] = if *fft < i as f32 {
+                    //FIRE_STRING[row - fft as usize].stylize()
+                    ' '.on_black()
+                } else {
+                    ' '.stylize()
+                };
+            }
+        }
+    });
 
     let _listener = stream
         .add_local_listener_with_user_data(data)
@@ -156,7 +166,7 @@ pub fn main() -> Result<(), pw::Error> {
                     let samples_mono = samples
                         .chunks(n_channels as usize)
                         .map(|s| s.iter().sum::<f32>() / n_channels as f32)
-                        .take(256);
+                        .take(N_FFT);
 
                     fft_buffer
                         .iter_mut()
@@ -165,53 +175,15 @@ pub fn main() -> Result<(), pw::Error> {
                     fft_forward.process_with_scratch(&mut fft_buffer, &mut fft_scratch);
 
                     let mut stdout = stdout();
-                    stdout
-                        .queue(terminal::Clear(terminal::ClearType::All))
-                        .unwrap();
 
-                    for (i, amp) in fft_buffer
+                    let fft_norm: Vec<_> = fft_buffer
                         .iter()
-                        .map(|n| min_max_norm(20.0 * n.abs().log10(), MIN_DB, MAX_DB))
-                        .enumerate()
-                    {
-                        let amp = (amp * 20.0) as usize;
-                        for height in 0..30 {
-                            if amp > height {
-                                stdout
-                                    .queue(cursor::MoveTo(i as u16, height as u16))
-                                    .unwrap()
-                                    .queue(style::Print("0"))
-                                    .unwrap();
-                            }
-                        }
-                    }
-                    stdout.flush().unwrap();
+                        .map(|n| min_max_norm(amp2db(n.abs()), MIN_DB, MAX_DB) * 20.0)
+                        .collect();
 
-                    //stdout()
-                    //    .queue(terminal::Clear(terminal::ClearType::All)).unwrap()
-                    //    .queue(cursor::MoveTo(0, 0)).unwrap()
-                    //    .flush().unwrap()
+                    view_buffer.update(fft_norm);
+                    view_buffer.present(&mut stdout, false).unwrap();
 
-                    //for c in 0..n_channels {
-                    //    let mut max: f32 = 0.0;
-                    //    for n in (c..n_samples).step_by(n_channels as usize) {
-                    //        let f = samples[n as usize];
-                    //        //max = max.max((f as f32 / i16::MAX as f32).abs());
-                    //        max = max.max(f.abs());
-                    //    }
-                    //
-                    //    let peak = ((max * 30.0) as usize).clamp(0, 39);
-                    //
-                    //    println!(
-                    //        "channel {}: |{:>w1$}{:w2$}| peak:{}",
-                    //        c,
-                    //        "*",
-                    //        "",
-                    //        max,
-                    //        w1 = peak + 1,
-                    //        w2 = 40 - peak
-                    //    );
-                    //}
                     user_data.cursor_move = true;
                 }
             }
@@ -250,17 +222,33 @@ pub fn main() -> Result<(), pw::Error> {
     )?;
     do_roundtrip(&mainloop, &core);
 
-    let (sx, rx) = mpsc::channel();
-    sx.send(0).unwrap();
-    //let mainloop_clone = mainloop.clone();
+    //let done = Arc::new(Mutex::new(false));
+    //let loop_clone = mainloop.clone();
+
+    //let (sx, rx) = mpsc::channel();
     //ctrlc::set_handler(move || {
     //    stdout().execute(cursor::Show).unwrap();
-    //    //mainloop_clone.quit();
-    //    sx.send(1).unwrap();
+    //    //loop_clone.quit();
     //}).unwrap();
 
-    // and wait while we let things run
+    //let pending = core.sync(0).expect("sync failed");
+    //
+    //let done_clone = done.clone();
+    //let _listener_core = core
+    //    .add_listener_local()
+    //    .done(move |id, seq| {
+    //        if id == pw::core::PW_ID_CORE && seq == pending {
+    //            *done_clone.lock().unwrap() = true;
+    //            loop_clone.quit();
+    //            //for _ in rx.iter() {
+    //            //}
+    //        }
+    //    })
+    //    .register();
+
     mainloop.run();
+    //while !done.lock().unwrap().clone() {
+    //}
 
     Ok(())
 }
@@ -321,3 +309,19 @@ fn do_roundtrip(mainloop: &pw::main_loop::MainLoopRc, core: &pw::core::CoreRc) {
         mainloop.run();
     }
 }
+
+fn amp2db(amplitude: f32) -> f32 {
+    let abs_amplitude = amplitude.abs();
+
+    // Define a very small positive number to act as a floor.
+    // This prevents `log10(0)` which is -infinity and causes NaN or inf.
+    const MIN_AMPLITUDE: f32 = f32::EPSILON; // Smallest positive non-zero f64
+
+    let clamped_amplitude = abs_amplitude.max(MIN_AMPLITUDE);
+
+    // Apply the decibel formula: 20 * log10(clamped_amplitude / reference_amplitude)
+    // Since we assume normalized amplitude, reference_amplitude is 1.0.
+    20.0 * clamped_amplitude.log10()
+}
+
+

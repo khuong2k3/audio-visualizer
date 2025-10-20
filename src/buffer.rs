@@ -2,16 +2,16 @@ use std::io::{self, Stdout, Write};
 
 use crossterm::{cursor, style::{self, StyledContent, Stylize}, QueueableCommand};
 
-pub struct Buffer {
+pub struct Buffer<D> {
     bufs: [Vec<StyledContent<char>>; 2],
     current: usize,
     width: usize,
     height: usize,
-    on_update: Option<Box<dyn FnMut(&mut [StyledContent<char>], usize, usize)>> 
+    on_update: Option<Box<dyn FnMut(&mut [StyledContent<char>], usize, usize, D)>> 
 }
 
-impl Buffer {
-    fn new() -> Self {
+impl<D> Buffer<D> {
+    pub fn new() -> Self {
         Self {
             bufs: [Vec::new(), Vec::new()],
             current: 0,
@@ -21,7 +21,7 @@ impl Buffer {
         }
     }
 
-    fn on_update(&mut self, on_update: impl FnMut(&mut [StyledContent<char>], usize, usize) + 'static) {
+    pub fn on_update(&mut self, on_update: impl FnMut(&mut [StyledContent<char>], usize, usize, D) + 'static) {
         self.on_update = Some(Box::new(on_update));
     }
 
@@ -44,6 +44,10 @@ impl Buffer {
     }
 
     pub fn resize(&mut self, new_w: usize, new_h: usize) {
+        if !self.check_resized(new_w, new_h) {
+            return;
+        }
+
         if self.width < new_w {
             self.width = new_w;
         }
@@ -61,16 +65,15 @@ impl Buffer {
         }
     }
 
-    fn update(&mut self) {
+    pub fn update(&mut self, update_data: D) {
         if let Some(on_update) = &mut self.on_update {
             let new_idx = (self.current + 1) % 2;
 
-            on_update(&mut self.bufs[new_idx], self.width, self.height);
-            self.current = new_idx;
+            on_update(&mut self.bufs[new_idx], self.width, self.height, update_data);
         }
     }
 
-    pub fn present(&self, stdout: &mut Stdout, force: bool) -> io::Result<()> {
+    pub fn present(&mut self, stdout: &mut Stdout, force: bool) -> io::Result<()> {
         let content = self.get();
 
         for y in 0..self.height {
@@ -83,6 +86,7 @@ impl Buffer {
                 }
             }
         }
+        self.next();
 
         stdout.flush()?;
 
