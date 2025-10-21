@@ -119,6 +119,7 @@ pub fn main() -> Result<(), pw::Error> {
         }
     });
 
+    stdout().queue(cursor::Hide).unwrap();
     let (event_send, event_rev) = mpsc::channel();
 
     let mainloop_audio = mainloop.clone();
