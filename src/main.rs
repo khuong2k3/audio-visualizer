@@ -16,6 +16,7 @@ use std::rc::Rc;
 use std::sync::mpsc;
 use std::time::Duration;
 use std::{mem, slice, thread};
+use clap::Parser;
 
 use crate::buffer::Buffer;
 
@@ -33,16 +34,15 @@ struct UserData {
 }
 const FILTER_NAME: &str = "audio-capture";
 
-//#[derive(Parser)]
-//#[clap(name = FILTER_NAME, about = "Audio stream capture example")]
-//struct Opt {
-//    #[clap(short, long, help = "The target object id to connect to")]
-//    target: String,
-//}
+#[derive(Parser)]
+#[clap(name = FILTER_NAME, about = "Audio stream capture example")]
+struct Opt {
+    #[clap(short, long, help = "The target object id to connect to")]
+    target: String,
+}
 
 const MIN_DB: f32 = -90.0;
 const MAX_DB: f32 = 20.0;
-//const N_FFT: usize = 128 + 64;
 
 fn min_max_norm(n: f32, min_v: f32, max_v: f32) -> f32 {
     (n.min(max_v).max(min_v) - min_v) / (max_v - min_v)
@@ -66,6 +66,7 @@ unsafe fn bytes_to_mut<T>(bytes: &mut [u8]) -> &mut [T] {
 
 pub fn main() -> Result<(), pw::Error> {
     pw::init();
+    let args = Opt::parse();
 
     let mainloop = pw::main_loop::MainLoopRc::new(None)?;
     let context = pw::context::ContextRc::new(&mainloop, None)?;
@@ -74,7 +75,8 @@ pub fn main() -> Result<(), pw::Error> {
     let monitor_id = get_node_id(
         &mainloop,
         &core,
-        "bluez_output.74_45_CE_66_BE_B7.1".to_string(),
+        args.target,
+        //"bluez_output.74_45_CE_66_BE_B7.1".to_string(),
     )
     .unwrap();
 
