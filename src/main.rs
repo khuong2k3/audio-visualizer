@@ -1,5 +1,5 @@
 use clap::Parser;
-use crossterm::style::{self, Stylize};
+use crossterm::style::Stylize;
 use crossterm::{QueueableCommand, cursor, event, terminal};
 use itertools::izip;
 use pipewire as pw;
@@ -36,7 +36,7 @@ const FILTER_NAME: &str = "audio-capture";
 #[derive(Parser)]
 #[clap(name = FILTER_NAME, about = "Audio stream capture example")]
 struct Opt {
-    #[clap(short, long, help = "The target object id to connect to")]
+    #[clap(short, long, help = "The target object name to connect to")]
     target: String,
 }
 
@@ -75,9 +75,8 @@ pub fn main() -> Result<(), pw::Error> {
         &mainloop,
         &core,
         args.target,
-        //"bluez_output.74_45_CE_66_BE_B7.1".to_string(),
     )
-    .unwrap();
+    .expect("Node don't exist.");
 
     let data = UserData {
         format: Default::default(),
@@ -111,7 +110,7 @@ pub fn main() -> Result<(), pw::Error> {
             let fft_height = fft * height as f32 * 0.5;
             for (i, row) in (0..height).rev().enumerate() {
                 buf[row][col] = if fft_height > i as f32 {
-                    ' '.on(gadient_color(0xc93b2e00, 0xC92E6F00, col as f32 / height as f32))
+                    ' '.on(gadient_color(0xc93b2e00, 0xC92E6F00, col as f32 / height as f32).into())
                 } else {
                     ' '.stylize()
                 };
@@ -351,14 +350,14 @@ pub fn rect_window(length: usize) -> impl Iterator<Item = f32> {
     (0..length).map(|_| 1.0)
 }
 
-fn to_color_hex(color: u32) -> (u8, u8, u8) {
+const fn to_color_hex(color: u32) -> (u8, u8, u8) {
     let red = ((color & 0xff000000) >> 24) as u8;
     let green = ((color & 0x00ff0000) >> 16) as u8;
     let blue = ((color & 0x0000ff00) >> 8) as u8;
     (red, green, blue)
 }
 
-fn gadient_color(color1: u32, color2: u32, t: f32) -> style::Color {
+const fn gadient_color(color1: u32, color2: u32, t: f32) -> (u8, u8, u8) {
     let (red1, green1, blue1) = to_color_hex(color1);
     let (red2, green2, blue2) = to_color_hex(color2);
 
@@ -366,7 +365,7 @@ fn gadient_color(color1: u32, color2: u32, t: f32) -> style::Color {
     let green = (green1 as f32 * (1.0 - t) + green2 as f32 * t) as u8;
     let blue = (blue1 as f32 * (1.0 - t) + blue2 as f32 * t) as u8;
 
-    style::Color::from((red, green, blue))
+    (red, green, blue)
 }
 
 #[cfg(test)]
