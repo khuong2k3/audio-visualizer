@@ -1,3 +1,4 @@
+use clap::Parser;
 use crossterm::style::Stylize;
 use crossterm::{QueueableCommand, cursor, event, terminal};
 use itertools::izip;
@@ -16,7 +17,6 @@ use std::rc::Rc;
 use std::sync::mpsc;
 use std::time::Duration;
 use std::{mem, slice, thread};
-use clap::Parser;
 
 use crate::buffer::Buffer;
 
@@ -107,9 +107,10 @@ pub fn main() -> Result<(), pw::Error> {
     let mut fft_window = hann_window(fft.into()).collect::<Vec<_>>();
 
     view_buffer.on_update(move |buf, width, height, fft_norm| {
+        let buf = &mut buf.chunks_mut(width).collect::<Vec<_>>();
         for (col, fft) in fft_norm.iter().enumerate() {
             for (i, row) in (0..height).rev().enumerate() {
-                buf[row * width + col] = if *fft < i as f32 {
+                buf[row][col] = if *fft > i as f32 {
                     ' '.on_black()
                 } else {
                     ' '.stylize()
@@ -206,7 +207,12 @@ pub fn main() -> Result<(), pw::Error> {
 
                     let fft_norm: Vec<_> = fft_buffer
                         .iter()
-                        .map(|n| min_max_norm(amp2db(n.abs()), MIN_DB, MAX_DB) * view_buffer.height() as f32 * 0.5)
+                        // normalize data for visualization
+                        .map(|n| {
+                            min_max_norm(amp2db(n.abs()), MIN_DB, MAX_DB)
+                                * view_buffer.height() as f32
+                                * 0.5
+                        })
                         .collect();
 
                     view_buffer.update(fft_norm);
