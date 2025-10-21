@@ -1,5 +1,6 @@
 use crossterm::style::Stylize;
-use crossterm::terminal;
+use crossterm::{QueueableCommand, cursor, event, terminal};
+use itertools::izip;
 use pipewire as pw;
 use pipewire::registry::GlobalObject;
 use pipewire::spa::param::format::{MediaSubtype, MediaType};
@@ -9,9 +10,12 @@ use rustfft::FftPlanner;
 use rustfft::num_complex::{Complex32, ComplexFloat};
 use spa::pod::Pod;
 use std::cell::{Cell, OnceCell};
-use std::io::stdout;
+use std::f32::consts::TAU;
+use std::io::{Write, stdout};
 use std::rc::Rc;
-use std::{mem, slice};
+use std::sync::mpsc;
+use std::time::Duration;
+use std::{mem, slice, thread};
 
 use crate::buffer::Buffer;
 
@@ -38,7 +42,7 @@ const FILTER_NAME: &str = "audio-capture";
 
 const MIN_DB: f32 = -90.0;
 const MAX_DB: f32 = 20.0;
-const N_FFT: usize = 128 + 64;
+//const N_FFT: usize = 128 + 64;
 
 fn min_max_norm(n: f32, min_v: f32, max_v: f32) -> f32 {
     (n.min(max_v).max(min_v) - min_v) / (max_v - min_v)
@@ -83,28 +87,27 @@ pub fn main() -> Result<(), pw::Error> {
         *pw::keys::MEDIA_TYPE => "Audio",
         // Stream/Audio/Input why this is correct ???
         *pw::keys::MEDIA_CLASS => "Stream/Audio/Input",
-        *pw::keys::AUDIO_FORMAT => "F32LE",
-        "audio.quantum" => "1024", // Set the processing block size
-        *pw::keys::NODE_LATENCY => format!("{}/{}", 1024, 48_000), // Request latency
+        //*pw::keys::AUDIO_FORMAT => "F32LE",
     };
 
     let stream = pw::stream::StreamBox::new(&core, FILTER_NAME, props)?;
 
-    let mut fft_planner = FftPlanner::<f32>::new();
-    let fft_forward = fft_planner.plan_fft(N_FFT, rustfft::FftDirection::Forward);
-    let mut fft_buffer = vec![Complex32::default(); N_FFT];
-    let mut fft_scratch = fft_buffer.clone();
-
+    terminal::enable_raw_mode().unwrap();
     let mut view_buffer = Buffer::<Vec<f32>>::new();
 
-    let (_, height) = terminal::size().unwrap();
-    view_buffer.resize(N_FFT, height as usize);
+    let (fft, height) = terminal::size().unwrap();
+    view_buffer.resize(fft.into(), height as usize);
+
+    let mut fft_planner = FftPlanner::<f32>::new();
+    let mut fft_forward = fft_planner.plan_fft(fft.into(), rustfft::FftDirection::Forward);
+    let mut fft_buffer = vec![Complex32::default(); fft.into()];
+    let mut fft_scratch = fft_buffer.clone();
+    let mut fft_window = hann_window(fft.into()).collect::<Vec<_>>();
 
     view_buffer.on_update(move |buf, width, height, fft_norm| {
         for (col, fft) in fft_norm.iter().enumerate() {
             for (i, row) in (0..height).rev().enumerate() {
                 buf[row * width + col] = if *fft < i as f32 {
-                    //FIRE_STRING[row - fft as usize].stylize()
                     ' '.on_black()
                 } else {
                     ' '.stylize()
@@ -113,6 +116,9 @@ pub fn main() -> Result<(), pw::Error> {
         }
     });
 
+    let (event_send, event_rev) = mpsc::channel();
+
+    let mainloop_audio = mainloop.clone();
     let _listener = stream
         .add_local_listener_with_user_data(data)
         .param_changed(|_stream, user_data, id, param| {
@@ -147,6 +153,33 @@ pub fn main() -> Result<(), pw::Error> {
             //);
         })
         .process(move |stream, user_data| {
+            // handle event
+            while let Ok(event) = event_rev.try_recv() {
+                match event {
+                    event::Event::Key(event::KeyEvent {
+                        code: event::KeyCode::Char('c'),
+                        modifiers: event::KeyModifiers::CONTROL,
+                        ..
+                    })
+                    | event::Event::Key(event::KeyEvent {
+                        code: event::KeyCode::Char('q'),
+                        ..
+                    }) => {
+                        mainloop_audio.quit();
+                    }
+                    event::Event::Resize(fft, height) => {
+                        view_buffer.resize(fft.into(), height.into());
+
+                        fft_forward =
+                            fft_planner.plan_fft(fft.into(), rustfft::FftDirection::Forward);
+                        fft_buffer = vec![Complex32::default(); fft.into()];
+                        fft_scratch = fft_buffer.clone();
+                        fft_window = hann_window(fft.into()).collect::<Vec<_>>();
+                    }
+                    _ => {}
+                }
+            }
+
             if let Some(mut buffer) = stream.dequeue_buffer() {
                 let datas = buffer.datas_mut();
                 if datas.is_empty() {
@@ -156,33 +189,26 @@ pub fn main() -> Result<(), pw::Error> {
                 let n_channels = user_data.format.channels();
 
                 if let Some(samples) = data.data() {
-                    //if user_data.cursor_move {
-                    //    print!("\x1B[{}A", n_channels + 1);
-                    //}
                     let samples = unsafe { bytes_to::<f32>(samples) };
-                    //let n_samples = samples.len() as u32;
-                    //println!("captured {} samples", n_samples / n_channels);
 
                     let samples_mono = samples
                         .chunks(n_channels as usize)
-                        .map(|s| s.iter().sum::<f32>() / n_channels as f32)
-                        .take(N_FFT);
+                        .map(|s| s.iter().sum::<f32>() / n_channels as f32);
 
-                    fft_buffer
-                        .iter_mut()
-                        .zip(samples_mono)
-                        .for_each(|(fft_buf, re)| *fft_buf = Complex32 { re, im: 0.0 });
+                    izip!(fft_buffer.iter_mut(), samples_mono, fft_window.iter(),)
+                        .for_each(|(fft_s, s, w)| *fft_s = (s * w).into());
+
                     fft_forward.process_with_scratch(&mut fft_buffer, &mut fft_scratch);
 
                     let mut stdout = stdout();
 
                     let fft_norm: Vec<_> = fft_buffer
                         .iter()
-                        .map(|n| min_max_norm(amp2db(n.abs()), MIN_DB, MAX_DB) * 20.0)
+                        .map(|n| min_max_norm(amp2db(n.abs()), MIN_DB, MAX_DB) * view_buffer.height() as f32 * 0.5)
                         .collect();
 
                     view_buffer.update(fft_norm);
-                    view_buffer.present(&mut stdout, false).unwrap();
+                    view_buffer.present(&mut stdout).unwrap();
 
                     user_data.cursor_move = true;
                 }
@@ -222,33 +248,23 @@ pub fn main() -> Result<(), pw::Error> {
     )?;
     do_roundtrip(&mainloop, &core);
 
-    //let done = Arc::new(Mutex::new(false));
-    //let loop_clone = mainloop.clone();
-
-    //let (sx, rx) = mpsc::channel();
-    //ctrlc::set_handler(move || {
-    //    stdout().execute(cursor::Show).unwrap();
-    //    //loop_clone.quit();
-    //}).unwrap();
-
-    //let pending = core.sync(0).expect("sync failed");
-    //
-    //let done_clone = done.clone();
-    //let _listener_core = core
-    //    .add_listener_local()
-    //    .done(move |id, seq| {
-    //        if id == pw::core::PW_ID_CORE && seq == pending {
-    //            *done_clone.lock().unwrap() = true;
-    //            loop_clone.quit();
-    //            //for _ in rx.iter() {
-    //            //}
-    //        }
-    //    })
-    //    .register();
+    thread::spawn(move || {
+        loop {
+            if event::poll(Duration::from_millis(100)).unwrap() {
+                event_send.send(event::read().unwrap()).unwrap();
+            }
+        }
+    });
 
     mainloop.run();
-    //while !done.lock().unwrap().clone() {
-    //}
+    stdout()
+        .queue(terminal::Clear(terminal::ClearType::All))
+        .unwrap()
+        .queue(cursor::Show)
+        .unwrap()
+        .flush()
+        .unwrap();
+    terminal::disable_raw_mode().unwrap();
 
     Ok(())
 }
@@ -324,4 +340,6 @@ fn amp2db(amplitude: f32) -> f32 {
     20.0 * clamped_amplitude.log10()
 }
 
-
+pub fn hann_window(length: usize) -> impl Iterator<Item = f32> {
+    (0..length).map(move |v| 0.5 * (1.0 - (TAU * v as f32 / (length as f32 - 1.0)).cos()))
+}
