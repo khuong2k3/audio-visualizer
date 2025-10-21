@@ -111,7 +111,7 @@ pub fn main() -> Result<(), pw::Error> {
             let fft_height = fft * height as f32 * 0.5;
             for (i, row) in (0..height).rev().enumerate() {
                 buf[row][col] = if fft_height > i as f32 {
-                    ' '.on(gadient_color(0xc93b2e00, 0xC92E6F00, *fft))
+                    ' '.on(gadient_color(0xc93b2e00, 0xC92E6F00, col as f32 / height as f32))
                 } else {
                     ' '.stylize()
                 };
