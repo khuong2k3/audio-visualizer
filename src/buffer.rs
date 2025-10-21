@@ -27,13 +27,6 @@ impl<D> Buffer<D> {
         }
     }
 
-    pub fn on_update(
-        &mut self,
-        on_update: impl FnMut(&mut [StyledContent<char>], usize, usize, D) + 'static,
-    ) {
-        self.on_update = Some(Box::new(on_update));
-    }
-
     fn get<'a>(&'a self) -> &'a Vec<StyledContent<char>> {
         &self.bufs[self.current]
     }
@@ -60,6 +53,13 @@ impl<D> Buffer<D> {
         self.height
     }
 
+    pub fn on_update(
+        &mut self,
+        on_update: impl FnMut(&mut [StyledContent<char>], usize, usize, D) + 'static,
+    ) {
+        self.on_update = Some(Box::new(on_update));
+    }
+
     pub fn resize(&mut self, new_w: usize, new_h: usize) {
         if !self.check_resized(new_w, new_h) {
             return;
@@ -67,17 +67,17 @@ impl<D> Buffer<D> {
         self.resized = true;
 
         let new_size = new_w * new_h;
+
+        if new_size != self.width * self.height {
+            self.bufs = [vec![' '.stylize(); new_size], vec![' '.stylize(); new_size]];
+        }
+
         self.width = new_w;
         self.height = new_h;
-
-        // Always re-create the buffers on resize. This ensures they have the correct
-        // dimensions and are cleared, which correctly forces a full redraw in `present`.
-        self.bufs = [vec![' '.stylize(); new_size], vec![' '.stylize(); new_size]];
     }
 
     pub fn update(&mut self, update_data: D) {
         if let Some(on_update) = &mut self.on_update {
-
             on_update(
                 &mut self.bufs[self.current],
                 self.width,
@@ -100,9 +100,6 @@ impl<D> Buffer<D> {
                     stdout
                         .queue(cursor::MoveTo(x as u16, y as u16))?
                         .queue(style::PrintStyledContent(bufs[self.current][idx]))?;
-                }
-                if self.resized {
-                    bufs[index_next][idx] = bufs[self.current][idx];
                 }
             }
         }

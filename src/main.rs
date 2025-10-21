@@ -1,5 +1,5 @@
 use clap::Parser;
-use crossterm::style::Stylize;
+use crossterm::style::{self, Stylize};
 use crossterm::{QueueableCommand, cursor, event, terminal};
 use itertools::izip;
 use pipewire as pw;
@@ -30,7 +30,6 @@ mod buffer;
 
 struct UserData {
     format: spa::param::audio::AudioInfoRaw,
-    cursor_move: bool,
 }
 const FILTER_NAME: &str = "audio-capture";
 
@@ -82,14 +81,12 @@ pub fn main() -> Result<(), pw::Error> {
 
     let data = UserData {
         format: Default::default(),
-        cursor_move: false,
     };
 
     let props = properties! {
         *pw::keys::MEDIA_TYPE => "Audio",
         // Stream/Audio/Input why this is correct ???
         *pw::keys::MEDIA_CLASS => "Stream/Audio/Input",
-        //*pw::keys::AUDIO_FORMAT => "F32LE",
     };
 
     let stream = pw::stream::StreamBox::new(&core, FILTER_NAME, props)?;
@@ -104,14 +101,17 @@ pub fn main() -> Result<(), pw::Error> {
     let mut fft_forward = fft_planner.plan_fft(fft.into(), rustfft::FftDirection::Forward);
     let mut fft_buffer = vec![Complex32::default(); fft.into()];
     let mut fft_scratch = fft_buffer.clone();
-    let mut fft_window = hann_window(fft.into()).collect::<Vec<_>>();
+    // window for smoother conversion
+    let window_func = hann_window;
+    let mut fft_window = window_func(fft.into()).collect::<Vec<_>>();
 
     view_buffer.on_update(move |buf, width, height, fft_norm| {
         let buf = &mut buf.chunks_mut(width).collect::<Vec<_>>();
         for (col, fft) in fft_norm.iter().enumerate() {
+            let fft_height = fft * height as f32 * 0.5;
             for (i, row) in (0..height).rev().enumerate() {
-                buf[row][col] = if *fft > i as f32 {
-                    ' '.on_black()
+                buf[row][col] = if fft_height > i as f32 {
+                    ' '.on(gadient_color(0xc93b2e00, 0xC92E6F00, *fft))
                 } else {
                     ' '.stylize()
                 };
@@ -177,7 +177,7 @@ pub fn main() -> Result<(), pw::Error> {
                             fft_planner.plan_fft(fft.into(), rustfft::FftDirection::Forward);
                         fft_buffer = vec![Complex32::default(); fft.into()];
                         fft_scratch = fft_buffer.clone();
-                        fft_window = hann_window(fft.into()).collect::<Vec<_>>();
+                        fft_window = window_func(fft.into()).collect::<Vec<_>>();
                     }
                     _ => {}
                 }
@@ -208,17 +208,11 @@ pub fn main() -> Result<(), pw::Error> {
                     let fft_norm: Vec<_> = fft_buffer
                         .iter()
                         // normalize data for visualization
-                        .map(|n| {
-                            min_max_norm(amp2db(n.abs()), MIN_DB, MAX_DB)
-                                * view_buffer.height() as f32
-                                * 0.5
-                        })
+                        .map(|n| min_max_norm(amp2db(n.abs()), MIN_DB, MAX_DB))
                         .collect();
 
                     view_buffer.update(fft_norm);
                     view_buffer.present(&mut stdout).unwrap();
-
-                    user_data.cursor_move = true;
                 }
             }
         })
@@ -351,3 +345,38 @@ fn amp2db(amplitude: f32) -> f32 {
 pub fn hann_window(length: usize) -> impl Iterator<Item = f32> {
     (0..length).map(move |v| 0.5 * (1.0 - (TAU * v as f32 / (length as f32 - 1.0)).cos()))
 }
+
+pub fn rect_window(length: usize) -> impl Iterator<Item = f32> {
+    (0..length).map(|_| 1.0)
+}
+
+fn to_color_hex(color: u32) -> (u8, u8, u8) {
+    let red = ((color & 0xff000000) >> 24) as u8;
+    let green = ((color & 0x00ff0000) >> 16) as u8;
+    let blue = ((color & 0x0000ff00) >> 8) as u8;
+    (red, green, blue)
+}
+
+fn gadient_color(color1: u32, color2: u32, t: f32) -> style::Color {
+    let (red1, green1, blue1) = to_color_hex(color1);
+    let (red2, green2, blue2) = to_color_hex(color2);
+
+    let red = (red1 as f32 * (1.0 - t) + red2 as f32 * t) as u8;
+    let green = (green1 as f32 * (1.0 - t) + green2 as f32 * t) as u8;
+    let blue = (blue1 as f32 * (1.0 - t) + blue2 as f32 * t) as u8;
+
+    style::Color::from((red, green, blue))
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test1() {
+        assert_eq!(to_color_hex(0xff000000).0, 0xff);
+        assert_eq!(to_color_hex(0xff000000).1, 0x00);
+        assert_eq!(to_color_hex(0xff00ff00).2, 0xff);
+    }
+}
+
