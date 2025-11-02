@@ -16,7 +16,7 @@ use std::io::{Write, stdout};
 use std::rc::Rc;
 use std::sync::mpsc;
 use std::time::Duration;
-use std::{mem, slice, thread};
+use std::{mem, slice, thread, u8};
 
 use crate::buffer::Buffer;
 
@@ -38,30 +38,12 @@ const FILTER_NAME: &str = "audio-capture";
 struct Opt {
     #[clap(short, long, help = "The target object name to connect to")]
     target: String,
+    #[clap(short, long, help = "The target object name to connect to")]
+    percent: Option<f32>,
 }
 
 const MIN_DB: f32 = -90.0;
 const MAX_DB: f32 = 20.0;
-
-fn min_max_norm(n: f32, min_v: f32, max_v: f32) -> f32 {
-    (n.min(max_v).max(min_v) - min_v) / (max_v - min_v)
-}
-
-#[allow(unused)]
-unsafe fn bytes_to<T>(bytes: &[u8]) -> &[T] {
-    let ptr = bytes.as_ptr() as *const T;
-    let len = bytes.len() / mem::size_of::<T>();
-
-    unsafe { slice::from_raw_parts(ptr, len) }
-}
-
-#[allow(unused)]
-unsafe fn bytes_to_mut<T>(bytes: &mut [u8]) -> &mut [T] {
-    let ptr = bytes.as_ptr() as *mut T;
-    let len = bytes.len() / std::mem::size_of::<T>();
-
-    unsafe { slice::from_raw_parts_mut(ptr, len) }
-}
 
 pub fn main() -> Result<(), pw::Error> {
     pw::init();
@@ -71,12 +53,7 @@ pub fn main() -> Result<(), pw::Error> {
     let context = pw::context::ContextRc::new(&mainloop, None)?;
     let core = context.connect_rc(None)?;
 
-    let monitor_id = get_node_id(
-        &mainloop,
-        &core,
-        args.target,
-    )
-    .expect("Node don't exist.");
+    let monitor_id = get_node_id(&mainloop, &core, args.target).expect("Node don't exist.");
 
     let data = UserData {
         format: Default::default(),
@@ -97,20 +74,21 @@ pub fn main() -> Result<(), pw::Error> {
     view_buffer.resize(fft.into(), height as usize);
 
     let mut fft_planner = FftPlanner::<f32>::new();
-    let mut fft_forward = fft_planner.plan_fft(fft.into(), rustfft::FftDirection::Forward);
-    let mut fft_buffer = vec![Complex32::default(); fft.into()];
+    let mut fft_forward = fft_planner.plan_fft(fft as usize * 2, rustfft::FftDirection::Forward);
+    let mut fft_buffer = vec![Complex32::default(); fft as usize * 2];
     let mut fft_scratch = fft_buffer.clone();
     // window for smoother conversion
     let window_func = hann_window;
-    let mut fft_window = window_func(fft.into()).collect::<Vec<_>>();
+    let mut fft_window = window_func(fft as usize * 2).collect::<Vec<_>>();
+    let height_percent = args.percent.unwrap_or(0.5);
 
     view_buffer.on_update(move |buf, width, height, fft_norm| {
         let buf = &mut buf.chunks_mut(width).collect::<Vec<_>>();
-        for (col, fft) in fft_norm.iter().enumerate() {
-            let fft_height = fft * height as f32 * 0.5;
-            for (i, row) in (0..height).rev().enumerate() {
+        for (i, row) in (0..height).rev().enumerate() {
+            for (col, fft) in fft_norm.iter().enumerate() {
+                let fft_height = fft * height as f32 * height_percent;
                 buf[row][col] = if fft_height > i as f32 {
-                    ' '.on(gadient_color(0xc93b2e00, 0xC92E6F00, col as f32 / height as f32).into())
+                    ' '.on(gadient_color(0xC93B2E, 0xC92E6F, col as f32 / height as f32).into())
                 } else {
                     ' '.stylize()
                 };
@@ -118,7 +96,8 @@ pub fn main() -> Result<(), pw::Error> {
         }
     });
 
-    stdout().queue(cursor::Hide).unwrap();
+    let mut stdout_au = stdout();
+    stdout_au.queue(cursor::Hide).unwrap();
     let (event_send, event_rev) = mpsc::channel();
 
     let mainloop_audio = mainloop.clone();
@@ -174,10 +153,10 @@ pub fn main() -> Result<(), pw::Error> {
                         view_buffer.resize(fft.into(), height.into());
 
                         fft_forward =
-                            fft_planner.plan_fft(fft.into(), rustfft::FftDirection::Forward);
-                        fft_buffer = vec![Complex32::default(); fft.into()];
+                            fft_planner.plan_fft(fft as usize * 2, rustfft::FftDirection::Forward);
+                        fft_buffer = vec![Complex32::default(); fft as usize * 2];
                         fft_scratch = fft_buffer.clone();
-                        fft_window = window_func(fft.into()).collect::<Vec<_>>();
+                        fft_window = window_func(fft as usize * 2).collect::<Vec<_>>();
                     }
                     _ => {}
                 }
@@ -203,16 +182,17 @@ pub fn main() -> Result<(), pw::Error> {
 
                     fft_forward.process_with_scratch(&mut fft_buffer, &mut fft_scratch);
 
-                    let mut stdout = stdout();
 
                     let fft_norm: Vec<_> = fft_buffer
                         .iter()
+                        //.skip(view_buffer.width())
                         // normalize data for visualization
                         .map(|n| min_max_norm(amp2db(n.abs()), MIN_DB, MAX_DB))
+                        .take(view_buffer.width())
                         .collect();
 
                     view_buffer.update(fft_norm);
-                    view_buffer.present(&mut stdout).unwrap();
+                    view_buffer.present(&mut stdout_au).unwrap();
                 }
             }
         })
@@ -289,7 +269,7 @@ fn get_node_id(
                 } => {
                     if let Some(node_name) = props.get(*pw::keys::NODE_NAME) {
                         if node_name == &name {
-                            node_id_clone.set(global.id).unwrap();
+                            let _ = node_id_clone.set(global.id);
                         }
                     }
                 }
@@ -351,15 +331,30 @@ pub fn rect_window(length: usize) -> impl Iterator<Item = f32> {
 }
 
 const fn to_color_hex(color: u32) -> (u8, u8, u8) {
-    let red = ((color & 0xff000000) >> 24) as u8;
-    let green = ((color & 0x00ff0000) >> 16) as u8;
-    let blue = ((color & 0x0000ff00) >> 8) as u8;
+    let red = ((color & 0xff0000) >> 16) as u8;
+    let green = ((color & 0x00ff00) >> 8) as u8;
+    let blue = (color & 0x0000ff) as u8;
     (red, green, blue)
 }
 
+const fn to_color_hex_alpha(color: u32) -> (u8, u8, u8) {
+    let red = ((color & 0xFF000000) >> 24) as u8;
+    let green = ((color & 0x00FF0000) >> 16) as u8;
+    let blue = ((color & 0x0000FF00) >> 8) as u8;
+    (red, green, blue)
+}
+
+const fn to_color_hex_all(color: u32) -> (u8, u8, u8) {
+    if color <= 0xFFFFFF {
+        to_color_hex(color)
+    } else {
+        to_color_hex_alpha(color)
+    }
+}
+
 const fn gadient_color(color1: u32, color2: u32, t: f32) -> (u8, u8, u8) {
-    let (red1, green1, blue1) = to_color_hex(color1);
-    let (red2, green2, blue2) = to_color_hex(color2);
+    let (red1, green1, blue1) = to_color_hex_all(color1);
+    let (red2, green2, blue2) = to_color_hex_all(color2);
 
     let red = (red1 as f32 * (1.0 - t) + red2 as f32 * t) as u8;
     let green = (green1 as f32 * (1.0 - t) + green2 as f32 * t) as u8;
@@ -368,15 +363,35 @@ const fn gadient_color(color1: u32, color2: u32, t: f32) -> (u8, u8, u8) {
     (red, green, blue)
 }
 
+const fn min_max_norm(n: f32, min_v: f32, max_v: f32) -> f32 {
+    (n.min(max_v).max(min_v) - min_v) / (max_v - min_v)
+}
+
+#[allow(unused)]
+unsafe fn bytes_to<T>(bytes: &[u8]) -> &[T] {
+    let ptr = bytes.as_ptr() as *const T;
+    let len = bytes.len() / mem::size_of::<T>();
+
+    unsafe { slice::from_raw_parts(ptr, len) }
+}
+
+#[allow(unused)]
+unsafe fn bytes_to_mut<T>(bytes: &mut [u8]) -> &mut [T] {
+    let ptr = bytes.as_ptr() as *mut T;
+    let len = bytes.len() / std::mem::size_of::<T>();
+
+    unsafe { slice::from_raw_parts_mut(ptr, len) }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
 
     #[test]
     fn test1() {
-        assert_eq!(to_color_hex(0xff000000).0, 0xff);
-        assert_eq!(to_color_hex(0xff000000).1, 0x00);
-        assert_eq!(to_color_hex(0xff00ff00).2, 0xff);
+        assert_eq!(to_color_hex_all(0xff000000).0, 0xff);
+        assert_eq!(to_color_hex_all(0xff000000).1, 0x00);
+        assert_eq!(to_color_hex_all(0xff00ff00).2, 0xff);
+        assert_eq!(to_color_hex_all(0xff00ff).2, 0xff);
     }
 }
-
